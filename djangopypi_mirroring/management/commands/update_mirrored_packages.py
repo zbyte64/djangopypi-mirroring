@@ -12,7 +12,37 @@ from django.core.files import File
 from django.core.management.base import BaseCommand
 from djangopypi.models import *
 
+from djangopypi_mirroring.utils import Pool
 
+def update_package(index, newer, pkg_name, update_package=False, update_release=False):
+    rpc = ServerProxy(index.url)
+    package, created = Package.objects.get_or_create(name=pkg_name)
+    
+    if not created and not update_package:
+        return
+    
+    for pkg_version in rpc.package_releases(pkg_name):
+        release, created = Release.objects.get_or_create(
+            package=package, version=pkg_version)
+        
+        if created:
+            newer.releases_added.add(release)
+        
+        if created or update_release:
+            pkg_data = rpc.release_data(pkg_name, pkg_version)
+            print 'Retrieved release data: %s' % (str(pkg_data),)
+            if 'name' in pkg_data:
+                del pkg_data['name']
+            if 'version' in pkg_data:
+                del pkg_data['version']
+            
+            for key, value in pkg_data.iteritems():
+                if key != 'classifier':
+                    release.package_info[key] = value
+                else:
+                    release.package_info.setlist(key, value)
+            
+            release.save()
 
 class Command(BaseCommand):
     help = """Load all classifiers from pypi. If any arguments are given,
@@ -21,8 +51,8 @@ official pypi list url"""
 
     def handle(self, *args, **options):
         for index in MasterIndex.objects.all():
-            rpc = ServerProxy(index.url)
             #TODO make a full fetch an option
+            rpc = ServerProxy(index.url)
             try:
                 assert False 
                 last = index.logs.latest()
@@ -37,30 +67,10 @@ official pypi list url"""
     
     def update_via_list_packages(self, rpc, index, newer):
         print 'Looking at all packages'
+        worker_pool = Pool(5) #TODO make this an option
         for pkg_name in rpc.list_packages():
-            package, created = Package.objects.get_or_create(name=pkg_name)
-            
-            for pkg_version in rpc.package_releases(pkg_name):
-                release, created = Release.objects.get_or_create(
-                    package=package, version=pkg_version)
-                
-                if created:
-                    newer.releases_added.add(release)
-                    pkg_data = rpc.release_data(pkg_name, pkg_version)
-                    print 'Retrieved release data: %s' % (str(pkg_data),)
-                    if 'name' in pkg_data:
-                        del pkg_data['name']
-                    if 'version' in pkg_data:
-                        del pkg_data['version']
-                    
-                    for key, value in pkg_data.iteritems():
-                        if key != 'classifier':
-                            release.package_info[key] = value
-                        else:
-                            release.package_info.setlist(key, value)
-                    
-                    release.save()
-            
+            print pkg_name
+            worker_pool.apply_async(update_package, args=(index, newer, pkg_name))
     
     def update_via_changelog(self, rpc, index, newer, last_created):
         print 'Looking at changes since: %d' % (mktime(last_created),)
