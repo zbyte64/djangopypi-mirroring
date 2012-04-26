@@ -9,6 +9,7 @@ from time import mktime
 from xmlrpclib import ServerProxy
 
 from django.core.files import File
+from django.core.files.base import ContentFile
 from django.core.management.base import BaseCommand
 from djangopypi.models import *
 
@@ -30,7 +31,7 @@ def update_package(index, newer, pkg_name, update_package=False, update_release=
         
         if created or update_release:
             pkg_data = rpc.release_data(pkg_name, pkg_version)
-            print 'Retrieved release data: %s' % (str(pkg_data),)
+            #print 'Retrieved release data: %s' % (str(pkg_data),)
             if 'name' in pkg_data:
                 del pkg_data['name']
             if 'version' in pkg_data:
@@ -43,6 +44,23 @@ def update_package(index, newer, pkg_name, update_package=False, update_release=
                     release.package_info.setlist(key, value)
             
             release.save()
+            
+            downloads = rpc.release_urls(pkg_name, pkg_version)
+            for download in downloads:
+                #print 'Download data: %s' % (str(download),)
+                dist, created = Distribution.objects.get_or_create(release=release,
+                    filetype=download['packagetype'],
+                    pyversion=download['python_version'])
+                
+                if created or not dist.content or dist.md5_digest != download['md5_digest']:
+                    dist.md5_digest = download['md5_digest']
+                    content_file = ContentFile(urllib.urlopen(download['url']).read())
+                    dist.content.save(download['filename'], content_file, False)
+                    print 'New Download:', dist
+                print 'Download: %s, %s, %s' % (created, dist.content, dist.md5_digest)
+                dist.comment = download['comment_text']
+                
+                dist.save()
 
 class Command(BaseCommand):
     help = """Load all classifiers from pypi. If any arguments are given,
@@ -67,10 +85,10 @@ official pypi list url"""
     
     def update_via_list_packages(self, rpc, index, newer):
         print 'Looking at all packages'
-        worker_pool = Pool(5) #TODO make this an option
+        worker_pool = Pool(15) #TODO make this an option
         for pkg_name in rpc.list_packages():
             print pkg_name
-            worker_pool.apply_async(update_package, args=(index, newer, pkg_name))
+            worker_pool.apply_async(update_package, args=(index, newer, pkg_name, True, True))
     
     def update_via_changelog(self, rpc, index, newer, last_created):
         print 'Looking at changes since: %d' % (mktime(last_created),)
